@@ -116,4 +116,5 @@ if st.sidebar.button("Ejecutar simulación"):
     # -----------------------------
     csv = df.to_csv(index=False)
     st.download_button(
-        "Des
+   descripcion = "Descripción del modelo de simulación"
+
