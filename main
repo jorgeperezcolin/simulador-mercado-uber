@@ -1,0 +1,421 @@
+"""
+Simulación de mercado tipo Uber con:
+
+✔ Precios personalizados optimizados por valor total (venta + LTV)
+✔ Precios uniformes dinámicos
+✔ Retención futura (continuidad)
+✔ Picos de demanda y capacidad instalada limitada
+✔ Cálculo de CS, PS, Welfare total, Equidad
+✔ Tabla final con todas las métricas
+✔ Gráfica principal + gráfica de precios históricos
+
+Requisitos:
+    pip install matplotlib
+"""
+
+import random
+import statistics
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# FUNCIONES DE RETENCIÓN Y VALOR FUTURO
+# ============================================================
+
+def modelo_prob_compra(precio, sensibilidad):
+    """Probabilidad sintética de compra HOY."""
+    base = max(0.05, 1 - (precio * sensibilidad) / 25)
+    return min(max(base, 0), 1)
+
+
+def modelo_retencion_futura(precio, confianza, sensibilidad, sentimiento_historico):
+    """
+    Probabilidad sintética de continuidad futura.
+    Combina: precio, confianza y sentimiento histórico.
+    """
+    precio_factor = max(0, 1 - (precio * sensibilidad) / 30)
+    confianza_factor = confianza
+    sentimiento_factor = max(0, min(1, sentimiento_historico))
+    mezcla = 0.4 * precio_factor + 0.3 * confianza_factor + 0.3 * sentimiento_factor
+    return min(max(mezcla, 0), 1)
+
+
+def LTV(prob_continuidad, frecuencia, margen_unitario=5, horizonte=12):
+    """Valor futuro esperado muy simple (tipo LTV)."""
+    return prob_continuidad * frecuencia * margen_unitario * horizonte
+
+
+# ============================================================
+# AGENTES
+# ============================================================
+
+class AgenteConsumidor:
+    def __init__(self, id):
+        self.id = id
+        self.sensibilidad_precio = random.uniform(0.2, 1.0)
+        self.confianza = 1.0
+        self.sentimientos = []
+        self.frecuencia = random.uniform(0.3, 1.0)
+
+    def sentimiento_reciente(self):
+        if not self.sentimientos:
+            return 0.5
+        if len(self.sentimientos) >= 3:
+            return statistics.mean(self.sentimientos[-3:])
+        return statistics.mean(self.sentimientos)
+
+    def actualizar_confianza(self):
+        s = self.sentimiento_reciente()
+        self.confianza = max(0, min(1, s))
+        return self.confianza
+
+    def no_atendido(self):
+        # Castigo fuerte: no fue atendido
+        self.sentimientos.append(-1.0)
+        self.confianza = max(0, self.confianza - 0.05)
+
+
+class AgenteConductor:
+    def __init__(self, id):
+        self.id = id
+        self.ingresos = 0
+        self.disponible = True  # sólo puede tomar 1 viaje por ronda
+
+    def aceptar_viaje(self, precio):
+        if not self.disponible:
+            return False
+        prob = min(1, precio / 20)
+        if random.random() < prob:
+            self.ingresos += precio * 0.7
+            self.disponible = False
+            return True
+        return False
+
+    def resetear(self):
+        self.disponible = True
+
+
+# ============================================================
+# UBER PERSONALIZADO (optimiza por valor total)
+# ============================================================
+
+class AgenteUberPersonalizado:
+    def __init__(self):
+        self.ingresos = 0
+        self.reputacion = 1.0
+
+    def decidir_precio(self, consumidor):
+        """
+        Explora un set discreto de precios y elige el que maximiza:
+        valor_total = valor_inmediato + valor_futuro - penalización_fairness
+        """
+        precios_posibles = [8, 10, 12, 14, 16, 18, 20]
+        mejor_precio = 10
+        mejor_valor = -999
+
+        sentimiento_hist = consumidor.sentimiento_reciente()
+
+        for precio in precios_posibles:
+            prob_hoy = modelo_prob_compra(precio, consumidor.sensibilidad_precio)
+            valor_inmediato = prob_hoy * precio
+
+            prob_futuro = modelo_retencion_futura(
+                precio,
+                consumidor.confianza,
+                consumidor.sensibilidad_precio,
+                sentimiento_hist
+            )
+            valor_futuro = LTV(prob_futuro, consumidor.frecuencia)
+
+            # Penalización por precios muy altos (riesgo de unfairness/fuga)
+            penalizacion = max(0, (precio - 16) * 0.5)
+
+            valor_total = valor_inmediato + valor_futuro - penalizacion
+
+            if valor_total > mejor_valor:
+                mejor_valor = valor_total
+                mejor_precio = precio
+
+        # Ajuste reputacional simple
+        if mejor_precio > 18:
+            self.reputacion -= 0.02
+        else:
+            self.reputacion += 0.01
+
+        return mejor_precio
+
+
+# ============================================================
+# UBER UNIFORME
+# ============================================================
+
+class AgenteUberUniforme:
+    def __init__(self):
+        self.ingresos = 0
+        self.precio_uniforme = 10
+        self.reputacion = 1.0
+
+    def actualizar_precio(self, demanda_relativa):
+        """
+        Si la demanda relativa > 1 (picos), sube precio.
+        Si no, baja precio.
+        """
+        if demanda_relativa > 1:
+            self.precio_uniforme += random.uniform(0.8, 2.0)
+        else:
+            self.precio_uniforme -= random.uniform(0.3, 1.0)
+
+        self.precio_uniforme = max(6, min(self.precio_uniforme, 20))
+
+        if self.precio_uniforme > 17:
+            self.reputacion -= 0.015
+        else:
+            self.reputacion += 0.01
+
+        return round(self.precio_uniforme, 2)
+
+    def decidir_precio(self):
+        return round(self.precio_uniforme, 2)
+
+
+# ============================================================
+# REGULADOR
+# ============================================================
+
+class Regulador:
+    def __init__(self):
+        self.alertas = 0
+
+    def evaluar(self, precios):
+        if not precios:
+            return "SIN_DATOS"
+        dispersion = max(precios) - min(precios)
+        if dispersion > 10:
+            self.alertas += 1
+            return "ALERTA"
+        return "OK"
+
+
+# ============================================================
+# SIMULACIÓN PRINCIPAL
+# ============================================================
+
+def simular_rondas(n_rondas=10, capacidad_conductores=10):
+
+    uber_p = AgenteUberPersonalizado()
+    uber_u = AgenteUberUniforme()
+    regulador = Regulador()
+
+    # Trayectorias para gráficas
+    trayectoria_confianza = []
+    trayectoria_rep_p = []
+    trayectoria_rep_u = []
+    trayectoria_ing_cond = []
+    trayectoria_no_atendida = []
+    trayectoria_continuidad = []
+
+    # Históricos de precios (para gráfica 2)
+    historial_precios_p = []
+    historial_precios_u = []
+
+    tabla = []
+
+    for ronda in range(1, n_rondas + 1):
+
+        # Demanda con picos (entre 0.5x y 2x capacidad)
+        demanda = random.randint(capacidad_conductores // 2,
+                                 capacidad_conductores * 2)
+
+        consumidores = [AgenteConsumidor(i) for i in range(demanda)]
+        conductores = [AgenteConductor(i) for i in range(capacidad_conductores)]
+
+        demanda_relativa = demanda / capacidad_conductores
+        precio_uniforme = uber_u.actualizar_precio(demanda_relativa)
+
+        precios_p = []
+        precios_u = []
+        demanda_no_atendida = 0
+        continuidad_estimadas = []
+
+        # Surplus por ronda
+        cs_ronda = 0.0
+        ps_ronda = 0.0
+
+        for c in consumidores:
+
+            # ====== PERSONALIZADO ======
+            precio_p = uber_p.decidir_precio(c)
+            precios_p.append(precio_p)
+
+            # Buscar conductor disponible
+            disponibles = [d for d in conductores if d.disponible]
+            if not disponibles:
+                c.no_atendido()
+                demanda_no_atendida += 1
+            else:
+                elegido = random.choice(disponibles)
+                if elegido.aceptar_viaje(precio_p):
+                    uber_p.ingresos += precio_p
+                    # Producer surplus (Uber+conductor, sin costos)
+                    ps_ronda += precio_p
+                    # Consumer surplus estimado
+                    wtp = min(40, 25 / c.sensibilidad_precio)
+                    cs_ronda += max(wtp - precio_p, 0)
+                else:
+                    c.sentimientos.append(-0.5)
+
+            c.actualizar_confianza()
+
+            prob_fut = modelo_retencion_futura(
+                precio_p, c.confianza, c.sensibilidad_precio, c.sentimiento_reciente()
+            )
+            continuidad_estimadas.append(prob_fut)
+
+            # ====== UNIFORME ======
+            precio_u = precio_uniforme
+            precios_u.append(precio_u)
+
+            disponibles = [d for d in conductores if d.disponible]
+            if not disponibles:
+                c.no_atendido()
+                demanda_no_atendida += 1
+            else:
+                elegido2 = random.choice(disponibles)
+                if elegido2.aceptar_viaje(precio_u):
+                    uber_u.ingresos += precio_u
+                    ps_ronda += precio_u
+                    wtp_u = min(40, 25 / c.sensibilidad_precio)
+                    cs_ronda += max(wtp_u - precio_u, 0)
+                else:
+                    c.sentimientos.append(-0.5)
+
+            c.actualizar_confianza()
+
+        # Reset conductores para siguiente ronda
+        for d in conductores:
+            d.resetear()
+
+        # ======= MÉTRICAS POR RONDA =======
+        confianza_media = statistics.mean([c.confianza for c in consumidores]) if consumidores else 0
+        ingresos_prom_cond = statistics.mean([d.ingresos for d in conductores]) if conductores else 0
+        continuidad_media = statistics.mean(continuidad_estimadas) if continuidad_estimadas else 0
+
+        # Promedios de precios por ronda
+        precio_p_prom = statistics.mean(precios_p) if precios_p else 0
+        precio_u_prom = statistics.mean(precios_u) if precios_u else 0
+
+        # Históricos de precios acumulados
+        historial_precios_p.extend(precios_p)
+        historial_precios_u.extend(precios_u)
+
+        precio_p_hist = statistics.mean(historial_precios_p) if historial_precios_p else 0
+        precio_u_hist = statistics.mean(historial_precios_u) if historial_precios_u else 0
+
+        # Índice de equidad de precios
+        todos_los_precios = precios_p + precios_u
+        if todos_los_precios:
+            dispersion = max(todos_los_precios) - min(todos_los_precios)
+            eq_index = 1 - min(dispersion / 20, 1)  # 1=igualdad total, 0=mucha dispersión
+        else:
+            eq_index = 1.0
+
+        estado_reg = regulador.evaluar(todos_los_precios)
+
+        welfare_ronda = cs_ronda + ps_ronda
+
+        # Guardar fila de tabla
+        tabla.append({
+            "r": ronda,
+            "dem": demanda,
+            "no": demanda_no_atendida,
+            "pp": round(precio_p_prom, 2),
+            "pu": round(precio_u_prom, 2),
+            "pp_hist": round(precio_p_hist, 2),
+            "pu_hist": round(precio_u_hist, 2),
+            "conf": round(confianza_media, 3),
+            "rep_p": round(uber_p.reputacion, 3),
+            "rep_u": round(uber_u.reputacion, 3),
+            "cont": round(continuidad_media, 3),
+            "cs": round(cs_ronda, 2),
+            "ps": round(ps_ronda, 2),
+            "w": round(welfare_ronda, 2),
+            "eq": round(eq_index, 3),
+            "alert": regulador.alertas
+        })
+
+        # Trayectorias
+        trayectoria_confianza.append(confianza_media)
+        trayectoria_rep_p.append(uber_p.reputacion)
+        trayectoria_rep_u.append(uber_u.reputacion)
+        trayectoria_ing_cond.append(ingresos_prom_cond)
+        trayectoria_no_atendida.append(demanda_no_atendida)
+        trayectoria_continuidad.append(continuidad_media)
+
+        # Log por ronda
+        print(f"\n=== Ronda {ronda} ===")
+        print(f"Demanda: {demanda} | No atendida: {demanda_no_atendida}")
+        print(f"Precio uniforme ronda: {precio_uniforme:.2f}")
+        print(f"Precio personalizado promedio ronda: {precio_p_prom:.2f}")
+        print(f"Precio uniforme promedio ronda: {precio_u_prom:.2f}")
+        print(f"Confianza media: {confianza_media:.3f} | Cont (retención): {continuidad_media:.3f}")
+        print(f"CS ronda: {cs_ronda:.2f} | PS ronda: {ps_ronda:.2f} | Welfare: {welfare_ronda:.2f}")
+        print(f"Índice de equidad (Eq): {eq_index:.3f}")
+        print(f"Estado regulador: {estado_reg}, Alertas acumuladas: {regulador.alertas}")
+
+    # ============================================================
+    # TABLA FINAL
+    # ============================================================
+
+    print("\n\n=========== TABLA FINAL ===========\n")
+    print("{:<4}{:<6}{:<8}{:<10}{:<10}{:<12}{:<12}{:<10}{:<10}{:<10}{:<10}{:<10}{:<10}{:<10}{:<8}{:<8}".format(
+        "R","Dem","NoAt","P_Pers","P_Unif","P_Pers_Hist","P_Unif_Hist",
+        "Conf","Rep_P","Rep_U","Cont","CS","PS","W","Eq","Alerts"
+    ))
+
+    for row in tabla:
+        print("{:<4}{:<6}{:<8}{:<10}{:<10}{:<12}{:<12}{:<10}{:<10}{:<10}{:<10}{:<10}{:<10}{:<10}{:<8}{:<8}".format(
+            row["r"], row["dem"], row["no"], row["pp"], row["pu"],
+            row["pp_hist"], row["pu_hist"],
+            row["conf"], row["rep_p"], row["rep_u"], row["cont"],
+            row["cs"], row["ps"], row["w"], row["eq"], row["alert"]
+        ))
+
+    # ============================================================
+    # GRÁFICA PRINCIPAL
+    # ============================================================
+
+    plt.figure(figsize=(14, 6))
+    plt.plot(trayectoria_confianza, label="Confianza consumidores")
+    plt.plot(trayectoria_rep_p, label="Reputación Personalizado")
+    plt.plot(trayectoria_rep_u, label="Reputación Uniforme")
+    plt.plot(trayectoria_ing_cond, label="Ingresos prom. conductores")
+    plt.plot(trayectoria_no_atendida, label="Demanda NO atendida")
+    plt.plot(trayectoria_continuidad, label="Retención (Cont)")
+    plt.title("Evolución del mercado con retención, CS/PS implícitos y picos de demanda")
+    plt.xlabel("Ronda")
+    plt.ylabel("Valor")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    # ============================================================
+    # GRÁFICA DE PRECIOS HISTÓRICOS
+    # ============================================================
+
+    plt.figure(figsize=(14, 6))
+    plt.plot(historial_precios_p, label="Precio Personalizado Histórico", alpha=0.8)
+    plt.plot(historial_precios_u, label="Precio Uniforme Histórico", alpha=0.8)
+    plt.title("Evolución histórica de precios (Personalizado vs Uniforme)")
+    plt.xlabel("Viajes simulados")
+    plt.ylabel("Precio")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+# ============================================================
+# EJECUCIÓN
+# ============================================================
+
+if __name__ == "__main__":
+    simular_rondas()
