@@ -48,7 +48,7 @@ base_price = st.sidebar.number_input(
 )
 
 price_sensitivity = st.sidebar.slider(
-    "Sensibilidad precio (surge)",
+    "Sensibilidad del surge pricing",
     min_value=0.0,
     max_value=0.05,
     value=0.01
@@ -61,4 +61,59 @@ if st.sidebar.button("Ejecutar simulación"):
 
     params = {
         "steps": steps,
-        "driver
+        "drivers": drivers,
+        "users": users,
+        "base_price": base_price,
+        "price_sensitivity": price_sensitivity
+    }
+
+    st.subheader("Parámetros del escenario")
+    st.json(params)
+
+    # Ejecutar simulación
+    results = run_simulation(params)
+    df = pd.DataFrame(results)
+
+    # -----------------------------
+    # KPIs EJECUTIVOS
+    # -----------------------------
+    st.subheader("KPIs del mercado")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "Precio promedio",
+        f"${df['price'].mean():.2f}"
+    )
+
+    col2.metric(
+        "Viajes totales",
+        int(df["trips"].sum())
+    )
+
+    col3.metric(
+        "Utilización de conductores",
+        f"{df['utilization'].mean():.2%}"
+    )
+
+    # -----------------------------
+    # VISUALIZACIONES
+    # -----------------------------
+    st.subheader("Evolución temporal")
+
+    st.line_chart(
+        df.set_index("step")[["price", "trips", "utilization"]]
+    )
+
+    # -----------------------------
+    # TABLA DETALLADA
+    # -----------------------------
+    st.subheader("Detalle por tick")
+    st.dataframe(df)
+
+    # -----------------------------
+    # DESCARGA
+    # -----------------------------
+    csv = df.to_csv(index=False)
+    st.download_button(
+        "Des
